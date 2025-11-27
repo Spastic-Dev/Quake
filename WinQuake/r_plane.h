@@ -15,37 +15,71 @@
 // for more details.
 //
 // DESCRIPTION:
-//	Refresh (R_*) module, global header.
-//	All the rendering/drawing stuff is here.
+//	Refresh, visplane stuff (floor, ceilings).
 //
 //-----------------------------------------------------------------------------
 
-#ifndef __R_LOCAL__
-#define __R_LOCAL__
 
-// Binary Angles, sine/cosine/atan lookups.
-#include "tables.h"
+#ifndef __R_PLANE__
+#define __R_PLANE__
 
-// Screen size related parameters.
-#include "doomdef.h"
 
-// Include the refresh/render data structs.
 #include "r_data.h"
 
+#ifdef __GNUG__
+#pragma interface
+#endif
 
 
-//
-// Separate header file for each module.
-//
-#include "r_main.h"
-#include "r_bsp.h"
-#include "r_segs.h"
-#include "r_plane.h"
-#include "r_data.h"
-#include "r_things.h"
-#include "r_draw.h"
+// Visplane related.
+extern  short*		lastopening;
 
-#endif		// __R_LOCAL__
+
+typedef void (*planefunction_t) (int top, int bottom);
+
+extern planefunction_t	floorfunc;
+extern planefunction_t	ceilingfunc_t;
+
+extern short		floorclip[SCREENWIDTH];
+extern short		ceilingclip[SCREENWIDTH];
+
+extern fixed_t		yslope[SCREENHEIGHT];
+extern fixed_t		distscale[SCREENWIDTH];
+
+void R_InitPlanes (void);
+void R_ClearPlanes (void);
+
+void
+R_MapPlane
+( int		y,
+  int		x1,
+  int		x2 );
+
+void
+R_MakeSpans
+( int		x,
+  int		t1,
+  int		b1,
+  int		t2,
+  int		b2 );
+
+void R_DrawPlanes (void);
+
+visplane_t*
+R_FindPlane
+( fixed_t	height,
+  int		picnum,
+  int		lightlevel );
+
+visplane_t*
+R_CheckPlane
+( visplane_t*	pl,
+  int		start,
+  int		stop );
+
+
+
+#endif
 //-----------------------------------------------------------------------------
 //
 // $Log:$

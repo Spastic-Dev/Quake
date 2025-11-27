@@ -1,674 +1,580 @@
-/*
-Copyright (C) 1996-1997 Id Software, Inc.
+// Emacs style mode select   -*- C++ -*- 
+//-----------------------------------------------------------------------------
+//
+// $Id:$
+//
+// Copyright (C) 1993-1996 by id Software, Inc.
+//
+// This source is available for distribution and/or modification
+// only under the terms of the DOOM Source Code License as
+// published by id Software. All rights reserved.
+//
+// The source is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// FITNESS FOR A PARTICULAR PURPOSE. See the DOOM Source Code License
+// for more details.
+//
+// $Log:$
+//
+// DESCRIPTION:
+//	BSP traversal, handling of LineSegs for rendering.
+//
+//-----------------------------------------------------------------------------
 
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-as published by the Free Software Foundation; either version 2
-of the License, or (at your option) any later version.
 
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  
+static const char
+rcsid[] = "$Id: r_bsp.c,v 1.4 1997/02/03 22:45:12 b1 Exp $";
 
-See the GNU General Public License for more details.
 
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
+#include "doomdef.h"
 
-*/
-// r_bsp.c
+#include "m_bbox.h"
 
-#include "quakedef.h"
-#include "r_local.h"
+#include "i_system.h"
+
+#include "r_main.h"
+#include "r_plane.h"
+#include "r_things.h"
+
+// State.
+#include "doomstat.h"
+#include "r_state.h"
+
+//#include "r_local.h"
+
+
+
+seg_t*		curline;
+side_t*		sidedef;
+line_t*		linedef;
+sector_t*	frontsector;
+sector_t*	backsector;
+
+drawseg_t	drawsegs[MAXDRAWSEGS];
+drawseg_t*	ds_p;
+
+
+void
+R_StoreWallRange
+( int	start,
+  int	stop );
+
+
+
 
 //
-// current entity info
+// R_ClearDrawSegs
 //
-qboolean		insubmodel;
-entity_t		*currententity;
-vec3_t			modelorg, base_modelorg;
-								// modelorg is the viewpoint reletive to
-								// the currently rendering entity
-vec3_t			r_entorigin;	// the currently rendering entity in world
-								// coordinates
-
-float			entity_rotation[3][3];
-
-vec3_t			r_worldmodelorg;
-
-int				r_currentbkey;
-
-typedef enum {touchessolid, drawnode, nodrawnode} solidstate_t;
-
-#define MAX_BMODEL_VERTS	500			// 6K
-#define MAX_BMODEL_EDGES	1000		// 12K
-
-static mvertex_t	*pbverts;
-static bedge_t		*pbedges;
-static int			numbverts, numbedges;
-
-static mvertex_t	*pfrontenter, *pfrontexit;
-
-static qboolean		makeclippededge;
-
-
-//===========================================================================
-
-/*
-================
-R_EntityRotate
-================
-*/
-void R_EntityRotate (vec3_t vec)
+void R_ClearDrawSegs (void)
 {
-	vec3_t	tvec;
-
-	VectorCopy (vec, tvec);
-	vec[0] = DotProduct (entity_rotation[0], tvec);
-	vec[1] = DotProduct (entity_rotation[1], tvec);
-	vec[2] = DotProduct (entity_rotation[2], tvec);
+    ds_p = drawsegs;
 }
 
 
-/*
-================
-R_RotateBmodel
-================
-*/
-void R_RotateBmodel (void)
-{
-	float	angle, s, c, temp1[3][3], temp2[3][3], temp3[3][3];
-
-// TODO: should use a look-up table
-// TODO: should really be stored with the entity instead of being reconstructed
-// TODO: could cache lazily, stored in the entity
-// TODO: share work with R_SetUpAliasTransform
-
-// yaw
-	angle = currententity->angles[YAW];		
-	angle = angle * M_PI*2 / 360;
-	s = sin(angle);
-	c = cos(angle);
-
-	temp1[0][0] = c;
-	temp1[0][1] = s;
-	temp1[0][2] = 0;
-	temp1[1][0] = -s;
-	temp1[1][1] = c;
-	temp1[1][2] = 0;
-	temp1[2][0] = 0;
-	temp1[2][1] = 0;
-	temp1[2][2] = 1;
-
-
-// pitch
-	angle = currententity->angles[PITCH];		
-	angle = angle * M_PI*2 / 360;
-	s = sin(angle);
-	c = cos(angle);
-
-	temp2[0][0] = c;
-	temp2[0][1] = 0;
-	temp2[0][2] = -s;
-	temp2[1][0] = 0;
-	temp2[1][1] = 1;
-	temp2[1][2] = 0;
-	temp2[2][0] = s;
-	temp2[2][1] = 0;
-	temp2[2][2] = c;
-
-	R_ConcatRotations (temp2, temp1, temp3);
-
-// roll
-	angle = currententity->angles[ROLL];		
-	angle = angle * M_PI*2 / 360;
-	s = sin(angle);
-	c = cos(angle);
-
-	temp1[0][0] = 1;
-	temp1[0][1] = 0;
-	temp1[0][2] = 0;
-	temp1[1][0] = 0;
-	temp1[1][1] = c;
-	temp1[1][2] = s;
-	temp1[2][0] = 0;
-	temp1[2][1] = -s;
-	temp1[2][2] = c;
-
-	R_ConcatRotations (temp1, temp3, entity_rotation);
 
 //
-// rotate modelorg and the transformation matrix
+// ClipWallSegment
+// Clips the given range of columns
+// and includes it in the new clip list.
 //
-	R_EntityRotate (modelorg);
-	R_EntityRotate (vpn);
-	R_EntityRotate (vright);
-	R_EntityRotate (vup);
-
-	R_TransformFrustum ();
-}
-
-
-/*
-================
-R_RecursiveClipBPoly
-================
-*/
-void R_RecursiveClipBPoly (bedge_t *pedges, mnode_t *pnode, msurface_t *psurf)
+typedef	struct
 {
-	bedge_t		*psideedges[2], *pnextedge, *ptedge;
-	int			i, side, lastside;
-	float		dist, frac, lastdist;
-	mplane_t	*splitplane, tplane;
-	mvertex_t	*pvert, *plastvert, *ptvert;
-	mnode_t		*pn;
-
-	psideedges[0] = psideedges[1] = NULL;
-
-	makeclippededge = false;
-
-// transform the BSP plane into model space
-// FIXME: cache these?
-	splitplane = pnode->plane;
-	tplane.dist = splitplane->dist -
-			DotProduct(r_entorigin, splitplane->normal);
-	tplane.normal[0] = DotProduct (entity_rotation[0], splitplane->normal);
-	tplane.normal[1] = DotProduct (entity_rotation[1], splitplane->normal);
-	tplane.normal[2] = DotProduct (entity_rotation[2], splitplane->normal);
-
-// clip edges to BSP plane
-	for ( ; pedges ; pedges = pnextedge)
-	{
-		pnextedge = pedges->pnext;
-
-	// set the status for the last point as the previous point
-	// FIXME: cache this stuff somehow?
-		plastvert = pedges->v[0];
-		lastdist = DotProduct (plastvert->position, tplane.normal) -
-				   tplane.dist;
-
-		if (lastdist > 0)
-			lastside = 0;
-		else
-			lastside = 1;
-
-		pvert = pedges->v[1];
-
-		dist = DotProduct (pvert->position, tplane.normal) - tplane.dist;
-
-		if (dist > 0)
-			side = 0;
-		else
-			side = 1;
-
-		if (side != lastside)
-		{
-		// clipped
-			if (numbverts >= MAX_BMODEL_VERTS)
-				return;
-
-		// generate the clipped vertex
-			frac = lastdist / (lastdist - dist);
-			ptvert = &pbverts[numbverts++];
-			ptvert->position[0] = plastvert->position[0] +
-					frac * (pvert->position[0] -
-					plastvert->position[0]);
-			ptvert->position[1] = plastvert->position[1] +
-					frac * (pvert->position[1] -
-					plastvert->position[1]);
-			ptvert->position[2] = plastvert->position[2] +
-					frac * (pvert->position[2] -
-					plastvert->position[2]);
-
-		// split into two edges, one on each side, and remember entering
-		// and exiting points
-		// FIXME: share the clip edge by having a winding direction flag?
-			if (numbedges >= (MAX_BMODEL_EDGES - 1))
-			{
-				Con_Printf ("Out of edges for bmodel\n");
-				return;
-			}
-
-			ptedge = &pbedges[numbedges];
-			ptedge->pnext = psideedges[lastside];
-			psideedges[lastside] = ptedge;
-			ptedge->v[0] = plastvert;
-			ptedge->v[1] = ptvert;
-
-			ptedge = &pbedges[numbedges + 1];
-			ptedge->pnext = psideedges[side];
-			psideedges[side] = ptedge;
-			ptedge->v[0] = ptvert;
-			ptedge->v[1] = pvert;
-
-			numbedges += 2;
-
-			if (side == 0)
-			{
-			// entering for front, exiting for back
-				pfrontenter = ptvert;
-				makeclippededge = true;
-			}
-			else
-			{
-				pfrontexit = ptvert;
-				makeclippededge = true;
-			}
-		}
-		else
-		{
-		// add the edge to the appropriate side
-			pedges->pnext = psideedges[side];
-			psideedges[side] = pedges;
-		}
-	}
-
-// if anything was clipped, reconstitute and add the edges along the clip
-// plane to both sides (but in opposite directions)
-	if (makeclippededge)
-	{
-		if (numbedges >= (MAX_BMODEL_EDGES - 2))
-		{
-			Con_Printf ("Out of edges for bmodel\n");
-			return;
-		}
-
-		ptedge = &pbedges[numbedges];
-		ptedge->pnext = psideedges[0];
-		psideedges[0] = ptedge;
-		ptedge->v[0] = pfrontexit;
-		ptedge->v[1] = pfrontenter;
-
-		ptedge = &pbedges[numbedges + 1];
-		ptedge->pnext = psideedges[1];
-		psideedges[1] = ptedge;
-		ptedge->v[0] = pfrontenter;
-		ptedge->v[1] = pfrontexit;
-
-		numbedges += 2;
-	}
-
-// draw or recurse further
-	for (i=0 ; i<2 ; i++)
-	{
-		if (psideedges[i])
-		{
-		// draw if we've reached a non-solid leaf, done if all that's left is a
-		// solid leaf, and continue down the tree if it's not a leaf
-			pn = pnode->children[i];
-
-		// we're done with this branch if the node or leaf isn't in the PVS
-			if (pn->visframe == r_visframecount)
-			{
-				if (pn->contents < 0)
-				{
-					if (pn->contents != CONTENTS_SOLID)
-					{
-						r_currentbkey = ((mleaf_t *)pn)->key;
-						R_RenderBmodelFace (psideedges[i], psurf);
-					}
-				}
-				else
-				{
-					R_RecursiveClipBPoly (psideedges[i], pnode->children[i],
-									  psurf);
-				}
-			}
-		}
-	}
-}
+    int	first;
+    int last;
+    
+} cliprange_t;
 
 
-/*
-================
-R_DrawSolidClippedSubmodelPolygons
-================
-*/
-void R_DrawSolidClippedSubmodelPolygons (model_t *pmodel)
+#define MAXSEGS		32
+
+// newend is one past the last valid seg
+cliprange_t*	newend;
+cliprange_t	solidsegs[MAXSEGS];
+
+
+
+
+//
+// R_ClipSolidWallSegment
+// Does handle solid walls,
+//  e.g. single sided LineDefs (middle texture)
+//  that entirely block the view.
+// 
+void
+R_ClipSolidWallSegment
+( int			first,
+  int			last )
 {
-	int			i, j, lindex;
-	vec_t		dot;
-	msurface_t	*psurf;
-	int			numsurfaces;
-	mplane_t	*pplane;
-	mvertex_t	bverts[MAX_BMODEL_VERTS];
-	bedge_t		bedges[MAX_BMODEL_EDGES], *pbedge;
-	medge_t		*pedge, *pedges;
+    cliprange_t*	next;
+    cliprange_t*	start;
 
-// FIXME: use bounding-box-based frustum clipping info?
+    // Find the first range that touches the range
+    //  (adjacent pixels are touching).
+    start = solidsegs;
+    while (start->last < first-1)
+	start++;
 
-	psurf = &pmodel->surfaces[pmodel->firstmodelsurface];
-	numsurfaces = pmodel->nummodelsurfaces;
-	pedges = pmodel->edges;
-
-	for (i=0 ; i<numsurfaces ; i++, psurf++)
+    if (first < start->first)
+    {
+	if (last < start->first-1)
 	{
-	// find which side of the node we are on
-		pplane = psurf->plane;
-
-		dot = DotProduct (modelorg, pplane->normal) - pplane->dist;
-
-	// draw the polygon
-		if (((psurf->flags & SURF_PLANEBACK) && (dot < -BACKFACE_EPSILON)) ||
-			(!(psurf->flags & SURF_PLANEBACK) && (dot > BACKFACE_EPSILON)))
-		{
-		// FIXME: use bounding-box-based frustum clipping info?
-
-		// copy the edges to bedges, flipping if necessary so always
-		// clockwise winding
-		// FIXME: if edges and vertices get caches, these assignments must move
-		// outside the loop, and overflow checking must be done here
-			pbverts = bverts;
-			pbedges = bedges;
-			numbverts = numbedges = 0;
-
-			if (psurf->numedges > 0)
-			{
-				pbedge = &bedges[numbedges];
-				numbedges += psurf->numedges;
-
-				for (j=0 ; j<psurf->numedges ; j++)
-				{
-				   lindex = pmodel->surfedges[psurf->firstedge+j];
-
-					if (lindex > 0)
-					{
-						pedge = &pedges[lindex];
-						pbedge[j].v[0] = &r_pcurrentvertbase[pedge->v[0]];
-						pbedge[j].v[1] = &r_pcurrentvertbase[pedge->v[1]];
-					}
-					else
-					{
-						lindex = -lindex;
-						pedge = &pedges[lindex];
-						pbedge[j].v[0] = &r_pcurrentvertbase[pedge->v[1]];
-						pbedge[j].v[1] = &r_pcurrentvertbase[pedge->v[0]];
-					}
-
-					pbedge[j].pnext = &pbedge[j+1];
-				}
-
-				pbedge[j-1].pnext = NULL;	// mark end of edges
-
-				R_RecursiveClipBPoly (pbedge, currententity->topnode, psurf);
-			}
-			else
-			{
-				Sys_Error ("no edges in bmodel");
-			}
-		}
+	    // Post is entirely visible (above start),
+	    //  so insert a new clippost.
+	    R_StoreWallRange (first, last);
+	    next = newend;
+	    newend++;
+	    
+	    while (next != start)
+	    {
+		*next = *(next-1);
+		next--;
+	    }
+	    next->first = first;
+	    next->last = last;
+	    return;
 	}
-}
+		
+	// There is a fragment above *start.
+	R_StoreWallRange (first, start->first - 1);
+	// Now adjust the clip size.
+	start->first = first;	
+    }
 
-
-/*
-================
-R_DrawSubmodelPolygons
-================
-*/
-void R_DrawSubmodelPolygons (model_t *pmodel, int clipflags)
-{
-	int			i;
-	vec_t		dot;
-	msurface_t	*psurf;
-	int			numsurfaces;
-	mplane_t	*pplane;
-
-// FIXME: use bounding-box-based frustum clipping info?
-
-	psurf = &pmodel->surfaces[pmodel->firstmodelsurface];
-	numsurfaces = pmodel->nummodelsurfaces;
-
-	for (i=0 ; i<numsurfaces ; i++, psurf++)
-	{
-	// find which side of the node we are on
-		pplane = psurf->plane;
-
-		dot = DotProduct (modelorg, pplane->normal) - pplane->dist;
-
-	// draw the polygon
-		if (((psurf->flags & SURF_PLANEBACK) && (dot < -BACKFACE_EPSILON)) ||
-			(!(psurf->flags & SURF_PLANEBACK) && (dot > BACKFACE_EPSILON)))
-		{
-			r_currentkey = ((mleaf_t *)currententity->topnode)->key;
-
-		// FIXME: use bounding-box-based frustum clipping info?
-			R_RenderFace (psurf, clipflags);
-		}
-	}
-}
-
-
-/*
-================
-R_RecursiveWorldNode
-================
-*/
-void R_RecursiveWorldNode (mnode_t *node, int clipflags)
-{
-	int			i, c, side, *pindex;
-	vec3_t		acceptpt, rejectpt;
-	mplane_t	*plane;
-	msurface_t	*surf, **mark;
-	mleaf_t		*pleaf;
-	double		d, dot;
-
-	if (node->contents == CONTENTS_SOLID)
-		return;		// solid
-
-	if (node->visframe != r_visframecount)
-		return;
-
-// cull the clipping planes if not trivial accept
-// FIXME: the compiler is doing a lousy job of optimizing here; it could be
-//  twice as fast in ASM
-	if (clipflags)
-	{
-		for (i=0 ; i<4 ; i++)
-		{
-			if (! (clipflags & (1<<i)) )
-				continue;	// don't need to clip against it
-
-		// generate accept and reject points
-		// FIXME: do with fast look-ups or integer tests based on the sign bit
-		// of the floating point values
-
-			pindex = pfrustum_indexes[i];
-
-			rejectpt[0] = (float)node->minmaxs[pindex[0]];
-			rejectpt[1] = (float)node->minmaxs[pindex[1]];
-			rejectpt[2] = (float)node->minmaxs[pindex[2]];
-			
-			d = DotProduct (rejectpt, view_clipplanes[i].normal);
-			d -= view_clipplanes[i].dist;
-
-			if (d <= 0)
-				return;
-
-			acceptpt[0] = (float)node->minmaxs[pindex[3+0]];
-			acceptpt[1] = (float)node->minmaxs[pindex[3+1]];
-			acceptpt[2] = (float)node->minmaxs[pindex[3+2]];
-
-			d = DotProduct (acceptpt, view_clipplanes[i].normal);
-			d -= view_clipplanes[i].dist;
-
-			if (d >= 0)
-				clipflags &= ~(1<<i);	// node is entirely on screen
-		}
-	}
+    // Bottom contained in start?
+    if (last <= start->last)
+	return;			
+		
+    next = start;
+    while (last >= (next+1)->first-1)
+    {
+	// There is a fragment between two posts.
+	R_StoreWallRange (next->last + 1, (next+1)->first - 1);
+	next++;
 	
-// if a leaf node, draw stuff
-	if (node->contents < 0)
+	if (last <= next->last)
 	{
-		pleaf = (mleaf_t *)node;
-
-		mark = pleaf->firstmarksurface;
-		c = pleaf->nummarksurfaces;
-
-		if (c)
-		{
-			do
-			{
-				(*mark)->visframe = r_framecount;
-				mark++;
-			} while (--c);
-		}
-
-	// deal with model fragments in this leaf
-		if (pleaf->efrags)
-		{
-			R_StoreEfrags (&pleaf->efrags);
-		}
-
-		pleaf->key = r_currentkey;
-		r_currentkey++;		// all bmodels in a leaf share the same key
+	    // Bottom is contained in next.
+	    // Adjust the clip size.
+	    start->last = next->last;	
+	    goto crunch;
 	}
+    }
+	
+    // There is a fragment after *next.
+    R_StoreWallRange (next->last + 1, last);
+    // Adjust the clip size.
+    start->last = last;
+	
+    // Remove start+1 to next from the clip list,
+    // because start now covers their area.
+  crunch:
+    if (next == start)
+    {
+	// Post just extended past the bottom of one post.
+	return;
+    }
+    
+
+    while (next++ != newend)
+    {
+	// Remove a post.
+	*++start = *next;
+    }
+
+    newend = start+1;
+}
+
+
+
+//
+// R_ClipPassWallSegment
+// Clips the given range of columns,
+//  but does not includes it in the clip list.
+// Does handle windows,
+//  e.g. LineDefs with upper and lower texture.
+//
+void
+R_ClipPassWallSegment
+( int	first,
+  int	last )
+{
+    cliprange_t*	start;
+
+    // Find the first range that touches the range
+    //  (adjacent pixels are touching).
+    start = solidsegs;
+    while (start->last < first-1)
+	start++;
+
+    if (first < start->first)
+    {
+	if (last < start->first-1)
+	{
+	    // Post is entirely visible (above start).
+	    R_StoreWallRange (first, last);
+	    return;
+	}
+		
+	// There is a fragment above *start.
+	R_StoreWallRange (first, start->first - 1);
+    }
+
+    // Bottom contained in start?
+    if (last <= start->last)
+	return;			
+		
+    while (last >= (start+1)->first-1)
+    {
+	// There is a fragment between two posts.
+	R_StoreWallRange (start->last + 1, (start+1)->first - 1);
+	start++;
+	
+	if (last <= start->last)
+	    return;
+    }
+	
+    // There is a fragment after *next.
+    R_StoreWallRange (start->last + 1, last);
+}
+
+
+
+//
+// R_ClearClipSegs
+//
+void R_ClearClipSegs (void)
+{
+    solidsegs[0].first = -0x7fffffff;
+    solidsegs[0].last = -1;
+    solidsegs[1].first = viewwidth;
+    solidsegs[1].last = 0x7fffffff;
+    newend = solidsegs+2;
+}
+
+//
+// R_AddLine
+// Clips the given segment
+// and adds any visible pieces to the line list.
+//
+void R_AddLine (seg_t*	line)
+{
+    int			x1;
+    int			x2;
+    angle_t		angle1;
+    angle_t		angle2;
+    angle_t		span;
+    angle_t		tspan;
+    
+    curline = line;
+
+    // OPTIMIZE: quickly reject orthogonal back sides.
+    angle1 = R_PointToAngle (line->v1->x, line->v1->y);
+    angle2 = R_PointToAngle (line->v2->x, line->v2->y);
+    
+    // Clip to view edges.
+    // OPTIMIZE: make constant out of 2*clipangle (FIELDOFVIEW).
+    span = angle1 - angle2;
+    
+    // Back side? I.e. backface culling?
+    if (span >= ANG180)
+	return;		
+
+    // Global angle needed by segcalc.
+    rw_angle1 = angle1;
+    angle1 -= viewangle;
+    angle2 -= viewangle;
+	
+    tspan = angle1 + clipangle;
+    if (tspan > 2*clipangle)
+    {
+	tspan -= 2*clipangle;
+
+	// Totally off the left edge?
+	if (tspan >= span)
+	    return;
+	
+	angle1 = clipangle;
+    }
+    tspan = clipangle - angle2;
+    if (tspan > 2*clipangle)
+    {
+	tspan -= 2*clipangle;
+
+	// Totally off the left edge?
+	if (tspan >= span)
+	    return;	
+	angle2 = -clipangle;
+    }
+    
+    // The seg is in the view range,
+    // but not necessarily visible.
+    angle1 = (angle1+ANG90)>>ANGLETOFINESHIFT;
+    angle2 = (angle2+ANG90)>>ANGLETOFINESHIFT;
+    x1 = viewangletox[angle1];
+    x2 = viewangletox[angle2];
+
+    // Does not cross a pixel?
+    if (x1 == x2)
+	return;				
+	
+    backsector = line->backsector;
+
+    // Single sided line?
+    if (!backsector)
+	goto clipsolid;		
+
+    // Closed door.
+    if (backsector->ceilingheight <= frontsector->floorheight
+	|| backsector->floorheight >= frontsector->ceilingheight)
+	goto clipsolid;		
+
+    // Window.
+    if (backsector->ceilingheight != frontsector->ceilingheight
+	|| backsector->floorheight != frontsector->floorheight)
+	goto clippass;	
+		
+    // Reject empty lines used for triggers
+    //  and special events.
+    // Identical floor and ceiling on both sides,
+    // identical light levels on both sides,
+    // and no middle texture.
+    if (backsector->ceilingpic == frontsector->ceilingpic
+	&& backsector->floorpic == frontsector->floorpic
+	&& backsector->lightlevel == frontsector->lightlevel
+	&& curline->sidedef->midtexture == 0)
+    {
+	return;
+    }
+    
+				
+  clippass:
+    R_ClipPassWallSegment (x1, x2-1);	
+    return;
+		
+  clipsolid:
+    R_ClipSolidWallSegment (x1, x2-1);
+}
+
+
+//
+// R_CheckBBox
+// Checks BSP node/subtree bounding box.
+// Returns true
+//  if some part of the bbox might be visible.
+//
+int	checkcoord[12][4] =
+{
+    {3,0,2,1},
+    {3,0,2,0},
+    {3,1,2,0},
+    {0},
+    {2,0,2,1},
+    {0,0,0,0},
+    {3,1,3,0},
+    {0},
+    {2,0,3,1},
+    {2,1,3,1},
+    {2,1,3,0}
+};
+
+
+boolean R_CheckBBox (fixed_t*	bspcoord)
+{
+    int			boxx;
+    int			boxy;
+    int			boxpos;
+
+    fixed_t		x1;
+    fixed_t		y1;
+    fixed_t		x2;
+    fixed_t		y2;
+    
+    angle_t		angle1;
+    angle_t		angle2;
+    angle_t		span;
+    angle_t		tspan;
+    
+    cliprange_t*	start;
+
+    int			sx1;
+    int			sx2;
+    
+    // Find the corners of the box
+    // that define the edges from current viewpoint.
+    if (viewx <= bspcoord[BOXLEFT])
+	boxx = 0;
+    else if (viewx < bspcoord[BOXRIGHT])
+	boxx = 1;
+    else
+	boxx = 2;
+		
+    if (viewy >= bspcoord[BOXTOP])
+	boxy = 0;
+    else if (viewy > bspcoord[BOXBOTTOM])
+	boxy = 1;
+    else
+	boxy = 2;
+		
+    boxpos = (boxy<<2)+boxx;
+    if (boxpos == 5)
+	return true;
+	
+    x1 = bspcoord[checkcoord[boxpos][0]];
+    y1 = bspcoord[checkcoord[boxpos][1]];
+    x2 = bspcoord[checkcoord[boxpos][2]];
+    y2 = bspcoord[checkcoord[boxpos][3]];
+    
+    // check clip list for an open space
+    angle1 = R_PointToAngle (x1, y1) - viewangle;
+    angle2 = R_PointToAngle (x2, y2) - viewangle;
+	
+    span = angle1 - angle2;
+
+    // Sitting on a line?
+    if (span >= ANG180)
+	return true;
+    
+    tspan = angle1 + clipangle;
+
+    if (tspan > 2*clipangle)
+    {
+	tspan -= 2*clipangle;
+
+	// Totally off the left edge?
+	if (tspan >= span)
+	    return false;	
+
+	angle1 = clipangle;
+    }
+    tspan = clipangle - angle2;
+    if (tspan > 2*clipangle)
+    {
+	tspan -= 2*clipangle;
+
+	// Totally off the left edge?
+	if (tspan >= span)
+	    return false;
+	
+	angle2 = -clipangle;
+    }
+
+
+    // Find the first clippost
+    //  that touches the source post
+    //  (adjacent pixels are touching).
+    angle1 = (angle1+ANG90)>>ANGLETOFINESHIFT;
+    angle2 = (angle2+ANG90)>>ANGLETOFINESHIFT;
+    sx1 = viewangletox[angle1];
+    sx2 = viewangletox[angle2];
+
+    // Does not cross a pixel.
+    if (sx1 == sx2)
+	return false;			
+    sx2--;
+	
+    start = solidsegs;
+    while (start->last < sx2)
+	start++;
+    
+    if (sx1 >= start->first
+	&& sx2 <= start->last)
+    {
+	// The clippost contains the new span.
+	return false;
+    }
+
+    return true;
+}
+
+
+
+//
+// R_Subsector
+// Determine floor/ceiling planes.
+// Add sprites of things in sector.
+// Draw one or more line segments.
+//
+void R_Subsector (int num)
+{
+    int			count;
+    seg_t*		line;
+    subsector_t*	sub;
+	
+#ifdef RANGECHECK
+    if (num>=numsubsectors)
+	I_Error ("R_Subsector: ss %i with numss = %i",
+		 num,
+		 numsubsectors);
+#endif
+
+    sscount++;
+    sub = &subsectors[num];
+    frontsector = sub->sector;
+    count = sub->numlines;
+    line = &segs[sub->firstline];
+
+    if (frontsector->floorheight < viewz)
+    {
+	floorplane = R_FindPlane (frontsector->floorheight,
+				  frontsector->floorpic,
+				  frontsector->lightlevel);
+    }
+    else
+	floorplane = NULL;
+    
+    if (frontsector->ceilingheight > viewz 
+	|| frontsector->ceilingpic == skyflatnum)
+    {
+	ceilingplane = R_FindPlane (frontsector->ceilingheight,
+				    frontsector->ceilingpic,
+				    frontsector->lightlevel);
+    }
+    else
+	ceilingplane = NULL;
+		
+    R_AddSprites (frontsector);	
+
+    while (count--)
+    {
+	R_AddLine (line);
+	line++;
+    }
+}
+
+
+
+
+//
+// RenderBSPNode
+// Renders all subsectors below a given node,
+//  traversing subtree recursively.
+// Just call with BSP root.
+void R_RenderBSPNode (int bspnum)
+{
+    node_t*	bsp;
+    int		side;
+
+    // Found a subsector?
+    if (bspnum & NF_SUBSECTOR)
+    {
+	if (bspnum == -1)			
+	    R_Subsector (0);
 	else
-	{
-	// node is just a decision point, so go down the apropriate sides
+	    R_Subsector (bspnum&(~NF_SUBSECTOR));
+	return;
+    }
+		
+    bsp = &nodes[bspnum];
+    
+    // Decide which side the view point is on.
+    side = R_PointOnSide (viewx, viewy, bsp);
 
-	// find which side of the node we are on
-		plane = node->plane;
+    // Recursively divide front space.
+    R_RenderBSPNode (bsp->children[side]); 
 
-		switch (plane->type)
-		{
-		case PLANE_X:
-			dot = modelorg[0] - plane->dist;
-			break;
-		case PLANE_Y:
-			dot = modelorg[1] - plane->dist;
-			break;
-		case PLANE_Z:
-			dot = modelorg[2] - plane->dist;
-			break;
-		default:
-			dot = DotProduct (modelorg, plane->normal) - plane->dist;
-			break;
-		}
-	
-		if (dot >= 0)
-			side = 0;
-		else
-			side = 1;
-
-	// recurse down the children, front side first
-		R_RecursiveWorldNode (node->children[side], clipflags);
-
-	// draw stuff
-		c = node->numsurfaces;
-
-		if (c)
-		{
-			surf = cl.worldmodel->surfaces + node->firstsurface;
-
-			if (dot < -BACKFACE_EPSILON)
-			{
-				do
-				{
-					if ((surf->flags & SURF_PLANEBACK) &&
-						(surf->visframe == r_framecount))
-					{
-						if (r_drawpolys)
-						{
-							if (r_worldpolysbacktofront)
-							{
-								if (numbtofpolys < MAX_BTOFPOLYS)
-								{
-									pbtofpolys[numbtofpolys].clipflags =
-											clipflags;
-									pbtofpolys[numbtofpolys].psurf = surf;
-									numbtofpolys++;
-								}
-							}
-							else
-							{
-								R_RenderPoly (surf, clipflags);
-							}
-						}
-						else
-						{
-							R_RenderFace (surf, clipflags);
-						}
-					}
-
-					surf++;
-				} while (--c);
-			}
-			else if (dot > BACKFACE_EPSILON)
-			{
-				do
-				{
-					if (!(surf->flags & SURF_PLANEBACK) &&
-						(surf->visframe == r_framecount))
-					{
-						if (r_drawpolys)
-						{
-							if (r_worldpolysbacktofront)
-							{
-								if (numbtofpolys < MAX_BTOFPOLYS)
-								{
-									pbtofpolys[numbtofpolys].clipflags =
-											clipflags;
-									pbtofpolys[numbtofpolys].psurf = surf;
-									numbtofpolys++;
-								}
-							}
-							else
-							{
-								R_RenderPoly (surf, clipflags);
-							}
-						}
-						else
-						{
-							R_RenderFace (surf, clipflags);
-						}
-					}
-
-					surf++;
-				} while (--c);
-			}
-
-		// all surfaces on the same node share the same sequence number
-			r_currentkey++;
-		}
-
-	// recurse down the back side
-		R_RecursiveWorldNode (node->children[!side], clipflags);
-	}
-}
-
-
-
-/*
-================
-R_RenderWorld
-================
-*/
-void R_RenderWorld (void)
-{
-	int			i;
-	model_t		*clmodel;
-	btofpoly_t	btofpolys[MAX_BTOFPOLYS];
-
-	pbtofpolys = btofpolys;
-
-	currententity = &cl_entities[0];
-	VectorCopy (r_origin, modelorg);
-	clmodel = currententity->model;
-	r_pcurrentvertbase = clmodel->vertexes;
-
-	R_RecursiveWorldNode (clmodel->nodes, 15);
-
-// if the driver wants the polygons back to front, play the visible ones back
-// in that order
-	if (r_worldpolysbacktofront)
-	{
-		for (i=numbtofpolys-1 ; i>=0 ; i--)
-		{
-			R_RenderPoly (btofpolys[i].psurf, btofpolys[i].clipflags);
-		}
-	}
+    // Possibly divide back space.
+    if (R_CheckBBox (bsp->bbox[side^1]))	
+	R_RenderBSPNode (bsp->children[side^1]);
 }
 
 

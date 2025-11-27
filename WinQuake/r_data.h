@@ -15,37 +15,46 @@
 // for more details.
 //
 // DESCRIPTION:
-//	Refresh (R_*) module, global header.
-//	All the rendering/drawing stuff is here.
+//  Refresh module, data I/O, caching, retrieval of graphics
+//  by name.
 //
 //-----------------------------------------------------------------------------
 
-#ifndef __R_LOCAL__
-#define __R_LOCAL__
 
-// Binary Angles, sine/cosine/atan lookups.
-#include "tables.h"
+#ifndef __R_DATA__
+#define __R_DATA__
 
-// Screen size related parameters.
-#include "doomdef.h"
+#include "r_defs.h"
+#include "r_state.h"
 
-// Include the refresh/render data structs.
-#include "r_data.h"
+#ifdef __GNUG__
+#pragma interface
+#endif
+
+// Retrieve column data for span blitting.
+byte*
+R_GetColumn
+( int		tex,
+  int		col );
 
 
+// I/O, setting up the stuff.
+void R_InitData (void);
+void R_PrecacheLevel (void);
 
-//
-// Separate header file for each module.
-//
-#include "r_main.h"
-#include "r_bsp.h"
-#include "r_segs.h"
-#include "r_plane.h"
-#include "r_data.h"
-#include "r_things.h"
-#include "r_draw.h"
 
-#endif		// __R_LOCAL__
+// Retrieval.
+// Floor/ceiling opaque texture tiles,
+// lookup by name. For animation?
+int R_FlatNumForName (char* name);
+
+
+// Called by P_Ticker for switches and animations,
+// returns the texture number for the texture name.
+int R_TextureNumForName (char *name);
+int R_CheckTextureNumForName (char *name);
+
+#endif
 //-----------------------------------------------------------------------------
 //
 // $Log:$

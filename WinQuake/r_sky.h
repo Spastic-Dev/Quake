@@ -15,37 +15,32 @@
 // for more details.
 //
 // DESCRIPTION:
-//	Refresh (R_*) module, global header.
-//	All the rendering/drawing stuff is here.
+//	Sky rendering.
 //
 //-----------------------------------------------------------------------------
 
-#ifndef __R_LOCAL__
-#define __R_LOCAL__
 
-// Binary Angles, sine/cosine/atan lookups.
-#include "tables.h"
-
-// Screen size related parameters.
-#include "doomdef.h"
-
-// Include the refresh/render data structs.
-#include "r_data.h"
+#ifndef __R_SKY__
+#define __R_SKY__
 
 
+#ifdef __GNUG__
+#pragma interface
+#endif
 
-//
-// Separate header file for each module.
-//
-#include "r_main.h"
-#include "r_bsp.h"
-#include "r_segs.h"
-#include "r_plane.h"
-#include "r_data.h"
-#include "r_things.h"
-#include "r_draw.h"
+// SKY, store the number for name.
+#define			SKYFLATNAME  "F_SKY1"
 
-#endif		// __R_LOCAL__
+// The sky map is 256*128*4 maps.
+#define ANGLETOSKYSHIFT		22
+
+extern  int		skytexture;
+extern int		skytexturemid;
+
+// Called whenever the view size changes.
+void R_InitSkyMap (void);
+
+#endif
 //-----------------------------------------------------------------------------
 //
 // $Log:$

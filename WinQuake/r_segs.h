@@ -15,37 +15,28 @@
 // for more details.
 //
 // DESCRIPTION:
-//	Refresh (R_*) module, global header.
-//	All the rendering/drawing stuff is here.
+//	Refresh module, drawing LineSegs from BSP.
 //
 //-----------------------------------------------------------------------------
 
-#ifndef __R_LOCAL__
-#define __R_LOCAL__
 
-// Binary Angles, sine/cosine/atan lookups.
-#include "tables.h"
-
-// Screen size related parameters.
-#include "doomdef.h"
-
-// Include the refresh/render data structs.
-#include "r_data.h"
+#ifndef __R_SEGS__
+#define __R_SEGS__
 
 
+#ifdef __GNUG__
+#pragma interface
+#endif
 
-//
-// Separate header file for each module.
-//
-#include "r_main.h"
-#include "r_bsp.h"
-#include "r_segs.h"
-#include "r_plane.h"
-#include "r_data.h"
-#include "r_things.h"
-#include "r_draw.h"
 
-#endif		// __R_LOCAL__
+void
+R_RenderMaskedSegRange
+( drawseg_t*	ds,
+  int		x1,
+  int		x2 );
+
+
+#endif
 //-----------------------------------------------------------------------------
 //
 // $Log:$

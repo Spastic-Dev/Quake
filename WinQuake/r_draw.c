@@ -1,908 +1,877 @@
-/*
-Copyright (C) 1996-1997 Id Software, Inc.
+// Emacs style mode select   -*- C++ -*- 
+//-----------------------------------------------------------------------------
+//
+// $Id:$
+//
+// Copyright (C) 1993-1996 by id Software, Inc.
+//
+// This source is available for distribution and/or modification
+// only under the terms of the DOOM Source Code License as
+// published by id Software. All rights reserved.
+//
+// The source is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// FITNESS FOR A PARTICULAR PURPOSE. See the DOOM Source Code License
+// for more details.
+//
+// $Log:$
+//
+// DESCRIPTION:
+//	The actual span/column drawing functions.
+//	Here find the main potential for optimization,
+//	 e.g. inline assembly, different algorithms.
+//
+//-----------------------------------------------------------------------------
 
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-as published by the Free Software Foundation; either version 2
-of the License, or (at your option) any later version.
 
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  
+static const char
+rcsid[] = "$Id: r_draw.c,v 1.4 1997/02/03 16:47:55 b1 Exp $";
 
-See the GNU General Public License for more details.
 
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
+#include "doomdef.h"
 
-*/
+#include "i_system.h"
+#include "z_zone.h"
+#include "w_wad.h"
 
-// r_draw.c
-
-#include "quakedef.h"
 #include "r_local.h"
-#include "d_local.h"	// FIXME: shouldn't need to include this
 
-#define MAXLEFTCLIPEDGES		100
+// Needs access to LFB (guess what).
+#include "v_video.h"
 
-// !!! if these are changed, they must be changed in asm_draw.h too !!!
-#define FULLY_CLIPPED_CACHED	0x80000000
-#define FRAMECOUNT_MASK			0x7FFFFFFF
-
-unsigned int	cacheoffset;
-
-int			c_faceclip;					// number of faces clipped
-
-zpointdesc_t	r_zpointdesc;
-
-polydesc_t		r_polydesc;
+// State.
+#include "doomstat.h"
 
 
+// ?
+#define MAXWIDTH			1120
+#define MAXHEIGHT			832
 
-clipplane_t	*entity_clipplanes;
-clipplane_t	view_clipplanes[4];
-clipplane_t	world_clipplanes[16];
-
-medge_t			*r_pedge;
-
-qboolean		r_leftclipped, r_rightclipped;
-static qboolean	makeleftedge, makerightedge;
-qboolean		r_nearzionly;
-
-int		sintable[SIN_BUFFER_SIZE];
-int		intsintable[SIN_BUFFER_SIZE];
-
-mvertex_t	r_leftenter, r_leftexit;
-mvertex_t	r_rightenter, r_rightexit;
-
-typedef struct
-{
-	float	u,v;
-	int		ceilv;
-} evert_t;
-
-int				r_emitted;
-float			r_nearzi;
-float			r_u1, r_v1, r_lzi1;
-int				r_ceilv1;
-
-qboolean	r_lastvertvalid;
-
-
-#if	!id386
-
-/*
-================
-R_EmitEdge
-================
-*/
-void R_EmitEdge (mvertex_t *pv0, mvertex_t *pv1)
-{
-	edge_t	*edge, *pcheck;
-	int		u_check;
-	float	u, u_step;
-	vec3_t	local, transformed;
-	float	*world;
-	int		v, v2, ceilv0;
-	float	scale, lzi0, u0, v0;
-	int		side;
-
-	if (r_lastvertvalid)
-	{
-		u0 = r_u1;
-		v0 = r_v1;
-		lzi0 = r_lzi1;
-		ceilv0 = r_ceilv1;
-	}
-	else
-	{
-		world = &pv0->position[0];
-	
-	// transform and project
-		VectorSubtract (world, modelorg, local);
-		TransformVector (local, transformed);
-	
-		if (transformed[2] < NEAR_CLIP)
-			transformed[2] = NEAR_CLIP;
-	
-		lzi0 = 1.0 / transformed[2];
-	
-	// FIXME: build x/yscale into transform?
-		scale = xscale * lzi0;
-		u0 = (xcenter + scale*transformed[0]);
-		if (u0 < r_refdef.fvrectx_adj)
-			u0 = r_refdef.fvrectx_adj;
-		if (u0 > r_refdef.fvrectright_adj)
-			u0 = r_refdef.fvrectright_adj;
-	
-		scale = yscale * lzi0;
-		v0 = (ycenter - scale*transformed[1]);
-		if (v0 < r_refdef.fvrecty_adj)
-			v0 = r_refdef.fvrecty_adj;
-		if (v0 > r_refdef.fvrectbottom_adj)
-			v0 = r_refdef.fvrectbottom_adj;
-	
-		ceilv0 = (int) ceil(v0);
-	}
-
-	world = &pv1->position[0];
-
-// transform and project
-	VectorSubtract (world, modelorg, local);
-	TransformVector (local, transformed);
-
-	if (transformed[2] < NEAR_CLIP)
-		transformed[2] = NEAR_CLIP;
-
-	r_lzi1 = 1.0 / transformed[2];
-
-	scale = xscale * r_lzi1;
-	r_u1 = (xcenter + scale*transformed[0]);
-	if (r_u1 < r_refdef.fvrectx_adj)
-		r_u1 = r_refdef.fvrectx_adj;
-	if (r_u1 > r_refdef.fvrectright_adj)
-		r_u1 = r_refdef.fvrectright_adj;
-
-	scale = yscale * r_lzi1;
-	r_v1 = (ycenter - scale*transformed[1]);
-	if (r_v1 < r_refdef.fvrecty_adj)
-		r_v1 = r_refdef.fvrecty_adj;
-	if (r_v1 > r_refdef.fvrectbottom_adj)
-		r_v1 = r_refdef.fvrectbottom_adj;
-
-	if (r_lzi1 > lzi0)
-		lzi0 = r_lzi1;
-
-	if (lzi0 > r_nearzi)	// for mipmap finding
-		r_nearzi = lzi0;
-
-// for right edges, all we want is the effect on 1/z
-	if (r_nearzionly)
-		return;
-
-	r_emitted = 1;
-
-	r_ceilv1 = (int) ceil(r_v1);
-
-
-// create the edge
-	if (ceilv0 == r_ceilv1)
-	{
-	// we cache unclipped horizontal edges as fully clipped
-		if (cacheoffset != 0x7FFFFFFF)
-		{
-			cacheoffset = FULLY_CLIPPED_CACHED |
-					(r_framecount & FRAMECOUNT_MASK);
-		}
-
-		return;		// horizontal edge
-	}
-
-	side = ceilv0 > r_ceilv1;
-
-	edge = edge_p++;
-
-	edge->owner = r_pedge;
-
-	edge->nearzi = lzi0;
-
-	if (side == 0)
-	{
-	// trailing edge (go from p1 to p2)
-		v = ceilv0;
-		v2 = r_ceilv1 - 1;
-
-		edge->surfs[0] = surface_p - surfaces;
-		edge->surfs[1] = 0;
-
-		u_step = ((r_u1 - u0) / (r_v1 - v0));
-		u = u0 + ((float)v - v0) * u_step;
-	}
-	else
-	{
-	// leading edge (go from p2 to p1)
-		v2 = ceilv0 - 1;
-		v = r_ceilv1;
-
-		edge->surfs[0] = 0;
-		edge->surfs[1] = surface_p - surfaces;
-
-		u_step = ((u0 - r_u1) / (v0 - r_v1));
-		u = r_u1 + ((float)v - r_v1) * u_step;
-	}
-
-	edge->u_step = u_step*0x100000;
-	edge->u = u*0x100000 + 0xFFFFF;
-
-// we need to do this to avoid stepping off the edges if a very nearly
-// horizontal edge is less than epsilon above a scan, and numeric error causes
-// it to incorrectly extend to the scan, and the extension of the line goes off
-// the edge of the screen
-// FIXME: is this actually needed?
-	if (edge->u < r_refdef.vrect_x_adj_shift20)
-		edge->u = r_refdef.vrect_x_adj_shift20;
-	if (edge->u > r_refdef.vrectright_adj_shift20)
-		edge->u = r_refdef.vrectright_adj_shift20;
+// status bar height at bottom of screen
+#define SBARHEIGHT		32
 
 //
-// sort the edge in normally
+// All drawing to the view buffer is accomplished in this file.
+// The other refresh files only know about ccordinates,
+//  not the architecture of the frame buffer.
+// Conveniently, the frame buffer is a linear one,
+//  and we need only the base address,
+//  and the total size == width*height*depth/8.,
 //
-	u_check = edge->u;
-	if (edge->surfs[0])
-		u_check++;	// sort trailers after leaders
 
-	if (!newedges[v] || newedges[v]->u >= u_check)
+
+byte*		viewimage; 
+int		viewwidth;
+int		scaledviewwidth;
+int		viewheight;
+int		viewwindowx;
+int		viewwindowy; 
+byte*		ylookup[MAXHEIGHT]; 
+int		columnofs[MAXWIDTH]; 
+
+// Color tables for different players,
+//  translate a limited part to another
+//  (color ramps used for  suit colors).
+//
+byte		translations[3][256];	
+ 
+ 
+
+
+//
+// R_DrawColumn
+// Source is the top of the column to scale.
+//
+lighttable_t*		dc_colormap; 
+int			dc_x; 
+int			dc_yl; 
+int			dc_yh; 
+fixed_t			dc_iscale; 
+fixed_t			dc_texturemid;
+
+// first pixel in a column (possibly virtual) 
+byte*			dc_source;		
+
+// just for profiling 
+int			dccount;
+
+//
+// A column is a vertical slice/span from a wall texture that,
+//  given the DOOM style restrictions on the view orientation,
+//  will always have constant z depth.
+// Thus a special case loop for very fast rendering can
+//  be used. It has also been used with Wolfenstein 3D.
+// 
+void R_DrawColumn (void) 
+{ 
+    int			count; 
+    byte*		dest; 
+    fixed_t		frac;
+    fixed_t		fracstep;	 
+ 
+    count = dc_yh - dc_yl; 
+
+    // Zero length, column does not exceed a pixel.
+    if (count < 0) 
+	return; 
+				 
+#ifdef RANGECHECK 
+    if ((unsigned)dc_x >= SCREENWIDTH
+	|| dc_yl < 0
+	|| dc_yh >= SCREENHEIGHT) 
+	I_Error ("R_DrawColumn: %i to %i at %i", dc_yl, dc_yh, dc_x); 
+#endif 
+
+    // Framebuffer destination address.
+    // Use ylookup LUT to avoid multiply with ScreenWidth.
+    // Use columnofs LUT for subwindows? 
+    dest = ylookup[dc_yl] + columnofs[dc_x];  
+
+    // Determine scaling,
+    //  which is the only mapping to be done.
+    fracstep = dc_iscale; 
+    frac = dc_texturemid + (dc_yl-centery)*fracstep; 
+
+    // Inner loop that does the actual texture mapping,
+    //  e.g. a DDA-lile scaling.
+    // This is as fast as it gets.
+    do 
+    {
+	// Re-map color indices from wall texture column
+	//  using a lighting/special effects LUT.
+	*dest = dc_colormap[dc_source[(frac>>FRACBITS)&127]];
+	
+	dest += SCREENWIDTH; 
+	frac += fracstep;
+	
+    } while (count--); 
+} 
+
+
+
+// UNUSED.
+// Loop unrolled.
+#if 0
+void R_DrawColumn (void) 
+{ 
+    int			count; 
+    byte*		source;
+    byte*		dest;
+    byte*		colormap;
+    
+    unsigned		frac;
+    unsigned		fracstep;
+    unsigned		fracstep2;
+    unsigned		fracstep3;
+    unsigned		fracstep4;	 
+ 
+    count = dc_yh - dc_yl + 1; 
+
+    source = dc_source;
+    colormap = dc_colormap;		 
+    dest = ylookup[dc_yl] + columnofs[dc_x];  
+	 
+    fracstep = dc_iscale<<9; 
+    frac = (dc_texturemid + (dc_yl-centery)*dc_iscale)<<9; 
+ 
+    fracstep2 = fracstep+fracstep;
+    fracstep3 = fracstep2+fracstep;
+    fracstep4 = fracstep3+fracstep;
+	
+    while (count >= 8) 
+    { 
+	dest[0] = colormap[source[frac>>25]]; 
+	dest[SCREENWIDTH] = colormap[source[(frac+fracstep)>>25]]; 
+	dest[SCREENWIDTH*2] = colormap[source[(frac+fracstep2)>>25]]; 
+	dest[SCREENWIDTH*3] = colormap[source[(frac+fracstep3)>>25]];
+	
+	frac += fracstep4; 
+
+	dest[SCREENWIDTH*4] = colormap[source[frac>>25]]; 
+	dest[SCREENWIDTH*5] = colormap[source[(frac+fracstep)>>25]]; 
+	dest[SCREENWIDTH*6] = colormap[source[(frac+fracstep2)>>25]]; 
+	dest[SCREENWIDTH*7] = colormap[source[(frac+fracstep3)>>25]]; 
+
+	frac += fracstep4; 
+	dest += SCREENWIDTH*8; 
+	count -= 8;
+    } 
+	
+    while (count > 0)
+    { 
+	*dest = colormap[source[frac>>25]]; 
+	dest += SCREENWIDTH; 
+	frac += fracstep; 
+	count--;
+    } 
+}
+#endif
+
+
+void R_DrawColumnLow (void) 
+{ 
+    int			count; 
+    byte*		dest; 
+    byte*		dest2;
+    fixed_t		frac;
+    fixed_t		fracstep;	 
+ 
+    count = dc_yh - dc_yl; 
+
+    // Zero length.
+    if (count < 0) 
+	return; 
+				 
+#ifdef RANGECHECK 
+    if ((unsigned)dc_x >= SCREENWIDTH
+	|| dc_yl < 0
+	|| dc_yh >= SCREENHEIGHT)
+    {
+	
+	I_Error ("R_DrawColumn: %i to %i at %i", dc_yl, dc_yh, dc_x);
+    }
+    //	dccount++; 
+#endif 
+    // Blocky mode, need to multiply by 2.
+    dc_x <<= 1;
+    
+    dest = ylookup[dc_yl] + columnofs[dc_x];
+    dest2 = ylookup[dc_yl] + columnofs[dc_x+1];
+    
+    fracstep = dc_iscale; 
+    frac = dc_texturemid + (dc_yl-centery)*fracstep;
+    
+    do 
+    {
+	// Hack. Does not work corretly.
+	*dest2 = *dest = dc_colormap[dc_source[(frac>>FRACBITS)&127]];
+	dest += SCREENWIDTH;
+	dest2 += SCREENWIDTH;
+	frac += fracstep; 
+
+    } while (count--);
+}
+
+
+//
+// Spectre/Invisibility.
+//
+#define FUZZTABLE		50 
+#define FUZZOFF	(SCREENWIDTH)
+
+
+int	fuzzoffset[FUZZTABLE] =
+{
+    FUZZOFF,-FUZZOFF,FUZZOFF,-FUZZOFF,FUZZOFF,FUZZOFF,-FUZZOFF,
+    FUZZOFF,FUZZOFF,-FUZZOFF,FUZZOFF,FUZZOFF,FUZZOFF,-FUZZOFF,
+    FUZZOFF,FUZZOFF,FUZZOFF,-FUZZOFF,-FUZZOFF,-FUZZOFF,-FUZZOFF,
+    FUZZOFF,-FUZZOFF,-FUZZOFF,FUZZOFF,FUZZOFF,FUZZOFF,FUZZOFF,-FUZZOFF,
+    FUZZOFF,-FUZZOFF,FUZZOFF,FUZZOFF,-FUZZOFF,-FUZZOFF,FUZZOFF,
+    FUZZOFF,-FUZZOFF,-FUZZOFF,-FUZZOFF,-FUZZOFF,FUZZOFF,FUZZOFF,
+    FUZZOFF,FUZZOFF,-FUZZOFF,FUZZOFF,FUZZOFF,-FUZZOFF,FUZZOFF 
+}; 
+
+int	fuzzpos = 0; 
+
+
+//
+// Framebuffer postprocessing.
+// Creates a fuzzy image by copying pixels
+//  from adjacent ones to left and right.
+// Used with an all black colormap, this
+//  could create the SHADOW effect,
+//  i.e. spectres and invisible players.
+//
+void R_DrawFuzzColumn (void) 
+{ 
+    int			count; 
+    byte*		dest; 
+    fixed_t		frac;
+    fixed_t		fracstep;	 
+
+    // Adjust borders. Low... 
+    if (!dc_yl) 
+	dc_yl = 1;
+
+    // .. and high.
+    if (dc_yh == viewheight-1) 
+	dc_yh = viewheight - 2; 
+		 
+    count = dc_yh - dc_yl; 
+
+    // Zero length.
+    if (count < 0) 
+	return; 
+
+    
+#ifdef RANGECHECK 
+    if ((unsigned)dc_x >= SCREENWIDTH
+	|| dc_yl < 0 || dc_yh >= SCREENHEIGHT)
+    {
+	I_Error ("R_DrawFuzzColumn: %i to %i at %i",
+		 dc_yl, dc_yh, dc_x);
+    }
+#endif
+
+
+    // Keep till detailshift bug in blocky mode fixed,
+    //  or blocky mode removed.
+    /* WATCOM code 
+    if (detailshift)
+    {
+	if (dc_x & 1)
 	{
-		edge->next = newedges[v];
-		newedges[v] = edge;
+	    outpw (GC_INDEX,GC_READMAP+(2<<8) ); 
+	    outp (SC_INDEX+1,12); 
 	}
 	else
 	{
-		pcheck = newedges[v];
-		while (pcheck->next && pcheck->next->u < u_check)
-			pcheck = pcheck->next;
-		edge->next = pcheck->next;
-		pcheck->next = edge;
+	    outpw (GC_INDEX,GC_READMAP); 
+	    outp (SC_INDEX+1,3); 
 	}
+	dest = destview + dc_yl*80 + (dc_x>>1); 
+    }
+    else
+    {
+	outpw (GC_INDEX,GC_READMAP+((dc_x&3)<<8) ); 
+	outp (SC_INDEX+1,1<<(dc_x&3)); 
+	dest = destview + dc_yl*80 + (dc_x>>2); 
+    }*/
 
-	edge->nextremove = removeedges[v2];
-	removeedges[v2] = edge;
-}
+    
+    // Does not work with blocky mode.
+    dest = ylookup[dc_yl] + columnofs[dc_x];
 
+    // Looks familiar.
+    fracstep = dc_iscale; 
+    frac = dc_texturemid + (dc_yl-centery)*fracstep; 
 
-/*
-================
-R_ClipEdge
-================
-*/
-void R_ClipEdge (mvertex_t *pv0, mvertex_t *pv1, clipplane_t *clip)
-{
-	float		d0, d1, f;
-	mvertex_t	clipvert;
+    // Looks like an attempt at dithering,
+    //  using the colormap #6 (of 0-31, a bit
+    //  brighter than average).
+    do 
+    {
+	// Lookup framebuffer, and retrieve
+	//  a pixel that is either one column
+	//  left or right of the current one.
+	// Add index from colormap to index.
+	*dest = colormaps[6*256+dest[fuzzoffset[fuzzpos]]]; 
 
-	if (clip)
-	{
-		do
-		{
-			d0 = DotProduct (pv0->position, clip->normal) - clip->dist;
-			d1 = DotProduct (pv1->position, clip->normal) - clip->dist;
+	// Clamp table lookup index.
+	if (++fuzzpos == FUZZTABLE) 
+	    fuzzpos = 0;
+	
+	dest += SCREENWIDTH;
 
-			if (d0 >= 0)
-			{
-			// point 0 is unclipped
-				if (d1 >= 0)
-				{
-				// both points are unclipped
-					continue;
-				}
+	frac += fracstep; 
+    } while (count--); 
+} 
+ 
+  
+ 
 
-			// only point 1 is clipped
+//
+// R_DrawTranslatedColumn
+// Used to draw player sprites
+//  with the green colorramp mapped to others.
+// Could be used with different translation
+//  tables, e.g. the lighter colored version
+//  of the BaronOfHell, the HellKnight, uses
+//  identical sprites, kinda brightened up.
+//
+byte*	dc_translation;
+byte*	translationtables;
 
-			// we don't cache clipped edges
-				cacheoffset = 0x7FFFFFFF;
-
-				f = d0 / (d0 - d1);
-				clipvert.position[0] = pv0->position[0] +
-						f * (pv1->position[0] - pv0->position[0]);
-				clipvert.position[1] = pv0->position[1] +
-						f * (pv1->position[1] - pv0->position[1]);
-				clipvert.position[2] = pv0->position[2] +
-						f * (pv1->position[2] - pv0->position[2]);
-
-				if (clip->leftedge)
-				{
-					r_leftclipped = true;
-					r_leftexit = clipvert;
-				}
-				else if (clip->rightedge)
-				{
-					r_rightclipped = true;
-					r_rightexit = clipvert;
-				}
-
-				R_ClipEdge (pv0, &clipvert, clip->next);
-				return;
-			}
-			else
-			{
-			// point 0 is clipped
-				if (d1 < 0)
-				{
-				// both points are clipped
-				// we do cache fully clipped edges
-					if (!r_leftclipped)
-						cacheoffset = FULLY_CLIPPED_CACHED |
-								(r_framecount & FRAMECOUNT_MASK);
-					return;
-				}
-
-			// only point 0 is clipped
-				r_lastvertvalid = false;
-
-			// we don't cache partially clipped edges
-				cacheoffset = 0x7FFFFFFF;
-
-				f = d0 / (d0 - d1);
-				clipvert.position[0] = pv0->position[0] +
-						f * (pv1->position[0] - pv0->position[0]);
-				clipvert.position[1] = pv0->position[1] +
-						f * (pv1->position[1] - pv0->position[1]);
-				clipvert.position[2] = pv0->position[2] +
-						f * (pv1->position[2] - pv0->position[2]);
-
-				if (clip->leftedge)
-				{
-					r_leftclipped = true;
-					r_leftenter = clipvert;
-				}
-				else if (clip->rightedge)
-				{
-					r_rightclipped = true;
-					r_rightenter = clipvert;
-				}
-
-				R_ClipEdge (&clipvert, pv1, clip->next);
-				return;
-			}
-		} while ((clip = clip->next) != NULL);
-	}
-
-// add the edge
-	R_EmitEdge (pv0, pv1);
-}
-
-#endif	// !id386
+void R_DrawTranslatedColumn (void) 
+{ 
+    int			count; 
+    byte*		dest; 
+    fixed_t		frac;
+    fixed_t		fracstep;	 
+ 
+    count = dc_yh - dc_yl; 
+    if (count < 0) 
+	return; 
+				 
+#ifdef RANGECHECK 
+    if ((unsigned)dc_x >= SCREENWIDTH
+	|| dc_yl < 0
+	|| dc_yh >= SCREENHEIGHT)
+    {
+	I_Error ( "R_DrawColumn: %i to %i at %i",
+		  dc_yl, dc_yh, dc_x);
+    }
+    
+#endif 
 
 
-/*
-================
-R_EmitCachedEdge
-================
-*/
-void R_EmitCachedEdge (void)
-{
-	edge_t		*pedge_t;
-
-	pedge_t = (edge_t *)((unsigned long)r_edges + r_pedge->cachededgeoffset);
-
-	if (!pedge_t->surfs[0])
-		pedge_t->surfs[0] = surface_p - surfaces;
+    // WATCOM VGA specific.
+    /* Keep for fixing.
+    if (detailshift)
+    {
+	if (dc_x & 1)
+	    outp (SC_INDEX+1,12); 
 	else
-		pedge_t->surfs[1] = surface_p - surfaces;
+	    outp (SC_INDEX+1,3);
+	
+	dest = destview + dc_yl*80 + (dc_x>>1); 
+    }
+    else
+    {
+	outp (SC_INDEX+1,1<<(dc_x&3)); 
 
-	if (pedge_t->nearzi > r_nearzi)	// for mipmap finding
-		r_nearzi = pedge_t->nearzi;
+	dest = destview + dc_yl*80 + (dc_x>>2); 
+    }*/
 
-	r_emitted = 1;
-}
+    
+    // FIXME. As above.
+    dest = ylookup[dc_yl] + columnofs[dc_x]; 
+
+    // Looks familiar.
+    fracstep = dc_iscale; 
+    frac = dc_texturemid + (dc_yl-centery)*fracstep; 
+
+    // Here we do an additional index re-mapping.
+    do 
+    {
+	// Translation tables are used
+	//  to map certain colorramps to other ones,
+	//  used with PLAY sprites.
+	// Thus the "green" ramp of the player 0 sprite
+	//  is mapped to gray, red, black/indigo. 
+	*dest = dc_colormap[dc_translation[dc_source[frac>>FRACBITS]]];
+	dest += SCREENWIDTH;
+	
+	frac += fracstep; 
+    } while (count--); 
+} 
 
 
-/*
-================
-R_RenderFace
-================
-*/
-void R_RenderFace (msurface_t *fa, int clipflags)
+
+
+//
+// R_InitTranslationTables
+// Creates the translation tables to map
+//  the green color ramp to gray, brown, red.
+// Assumes a given structure of the PLAYPAL.
+// Could be read from a lump instead.
+//
+void R_InitTranslationTables (void)
 {
-	int			i, lindex;
-	unsigned	mask;
-	mplane_t	*pplane;
-	float		distinv;
-	vec3_t		p_normal;
-	medge_t		*pedges, tedge;
-	clipplane_t	*pclip;
-
-// skip out if no more surfs
-	if ((surface_p) >= surf_max)
+    int		i;
+	
+    translationtables = Z_Malloc (256*3+255, PU_STATIC, 0);
+    translationtables = (byte *)(( (int)translationtables + 255 )& ~255);
+    
+    // translate just the 16 green colors
+    for (i=0 ; i<256 ; i++)
+    {
+	if (i >= 0x70 && i<= 0x7f)
 	{
-		r_outofsurfaces++;
-		return;
+	    // map green ramp to gray, brown, red
+	    translationtables[i] = 0x60 + (i&0xf);
+	    translationtables [i+256] = 0x40 + (i&0xf);
+	    translationtables [i+512] = 0x20 + (i&0xf);
 	}
-
-// ditto if not enough edges left, or switch to auxedges if possible
-	if ((edge_p + fa->numedges + 4) >= edge_max)
+	else
 	{
-		r_outofedges += fa->numedges;
-		return;
+	    // Keep all other colors as is.
+	    translationtables[i] = translationtables[i+256] 
+		= translationtables[i+512] = i;
 	}
-
-	c_faceclip++;
-
-// set up clip planes
-	pclip = NULL;
-
-	for (i=3, mask = 0x08 ; i>=0 ; i--, mask >>= 1)
-	{
-		if (clipflags & mask)
-		{
-			view_clipplanes[i].next = pclip;
-			pclip = &view_clipplanes[i];
-		}
-	}
-
-// push the edges through
-	r_emitted = 0;
-	r_nearzi = 0;
-	r_nearzionly = false;
-	makeleftedge = makerightedge = false;
-	pedges = currententity->model->edges;
-	r_lastvertvalid = false;
-
-	for (i=0 ; i<fa->numedges ; i++)
-	{
-		lindex = currententity->model->surfedges[fa->firstedge + i];
-
-		if (lindex > 0)
-		{
-			r_pedge = &pedges[lindex];
-
-		// if the edge is cached, we can just reuse the edge
-			if (!insubmodel)
-			{
-				if (r_pedge->cachededgeoffset & FULLY_CLIPPED_CACHED)
-				{
-					if ((r_pedge->cachededgeoffset & FRAMECOUNT_MASK) ==
-						r_framecount)
-					{
-						r_lastvertvalid = false;
-						continue;
-					}
-				}
-				else
-				{
-					if ((((unsigned long)edge_p - (unsigned long)r_edges) >
-						 r_pedge->cachededgeoffset) &&
-						(((edge_t *)((unsigned long)r_edges +
-						 r_pedge->cachededgeoffset))->owner == r_pedge))
-					{
-						R_EmitCachedEdge ();
-						r_lastvertvalid = false;
-						continue;
-					}
-				}
-			}
-
-		// assume it's cacheable
-			cacheoffset = (byte *)edge_p - (byte *)r_edges;
-			r_leftclipped = r_rightclipped = false;
-			R_ClipEdge (&r_pcurrentvertbase[r_pedge->v[0]],
-						&r_pcurrentvertbase[r_pedge->v[1]],
-						pclip);
-			r_pedge->cachededgeoffset = cacheoffset;
-
-			if (r_leftclipped)
-				makeleftedge = true;
-			if (r_rightclipped)
-				makerightedge = true;
-			r_lastvertvalid = true;
-		}
-		else
-		{
-			lindex = -lindex;
-			r_pedge = &pedges[lindex];
-		// if the edge is cached, we can just reuse the edge
-			if (!insubmodel)
-			{
-				if (r_pedge->cachededgeoffset & FULLY_CLIPPED_CACHED)
-				{
-					if ((r_pedge->cachededgeoffset & FRAMECOUNT_MASK) ==
-						r_framecount)
-					{
-						r_lastvertvalid = false;
-						continue;
-					}
-				}
-				else
-				{
-				// it's cached if the cached edge is valid and is owned
-				// by this medge_t
-					if ((((unsigned long)edge_p - (unsigned long)r_edges) >
-						 r_pedge->cachededgeoffset) &&
-						(((edge_t *)((unsigned long)r_edges +
-						 r_pedge->cachededgeoffset))->owner == r_pedge))
-					{
-						R_EmitCachedEdge ();
-						r_lastvertvalid = false;
-						continue;
-					}
-				}
-			}
-
-		// assume it's cacheable
-			cacheoffset = (byte *)edge_p - (byte *)r_edges;
-			r_leftclipped = r_rightclipped = false;
-			R_ClipEdge (&r_pcurrentvertbase[r_pedge->v[1]],
-						&r_pcurrentvertbase[r_pedge->v[0]],
-						pclip);
-			r_pedge->cachededgeoffset = cacheoffset;
-
-			if (r_leftclipped)
-				makeleftedge = true;
-			if (r_rightclipped)
-				makerightedge = true;
-			r_lastvertvalid = true;
-		}
-	}
-
-// if there was a clip off the left edge, add that edge too
-// FIXME: faster to do in screen space?
-// FIXME: share clipped edges?
-	if (makeleftedge)
-	{
-		r_pedge = &tedge;
-		r_lastvertvalid = false;
-		R_ClipEdge (&r_leftexit, &r_leftenter, pclip->next);
-	}
-
-// if there was a clip off the right edge, get the right r_nearzi
-	if (makerightedge)
-	{
-		r_pedge = &tedge;
-		r_lastvertvalid = false;
-		r_nearzionly = true;
-		R_ClipEdge (&r_rightexit, &r_rightenter, view_clipplanes[1].next);
-	}
-
-// if no edges made it out, return without posting the surface
-	if (!r_emitted)
-		return;
-
-	r_polycount++;
-
-	surface_p->data = (void *)fa;
-	surface_p->nearzi = r_nearzi;
-	surface_p->flags = fa->flags;
-	surface_p->insubmodel = insubmodel;
-	surface_p->spanstate = 0;
-	surface_p->entity = currententity;
-	surface_p->key = r_currentkey++;
-	surface_p->spans = NULL;
-
-	pplane = fa->plane;
-// FIXME: cache this?
-	TransformVector (pplane->normal, p_normal);
-// FIXME: cache this?
-	distinv = 1.0 / (pplane->dist - DotProduct (modelorg, pplane->normal));
-
-	surface_p->d_zistepu = p_normal[0] * xscaleinv * distinv;
-	surface_p->d_zistepv = -p_normal[1] * yscaleinv * distinv;
-	surface_p->d_ziorigin = p_normal[2] * distinv -
-			xcenter * surface_p->d_zistepu -
-			ycenter * surface_p->d_zistepv;
-
-//JDC	VectorCopy (r_worldmodelorg, surface_p->modelorg);
-	surface_p++;
+    }
 }
 
 
-/*
-================
-R_RenderBmodelFace
-================
-*/
-void R_RenderBmodelFace (bedge_t *pedges, msurface_t *psurf)
-{
-	int			i;
-	unsigned	mask;
-	mplane_t	*pplane;
-	float		distinv;
-	vec3_t		p_normal;
-	medge_t		tedge;
-	clipplane_t	*pclip;
 
-// skip out if no more surfs
-	if (surface_p >= surf_max)
-	{
-		r_outofsurfaces++;
-		return;
-	}
 
-// ditto if not enough edges left, or switch to auxedges if possible
-	if ((edge_p + psurf->numedges + 4) >= edge_max)
-	{
-		r_outofedges += psurf->numedges;
-		return;
-	}
+//
+// R_DrawSpan 
+// With DOOM style restrictions on view orientation,
+//  the floors and ceilings consist of horizontal slices
+//  or spans with constant z depth.
+// However, rotation around the world z axis is possible,
+//  thus this mapping, while simpler and faster than
+//  perspective correct texture mapping, has to traverse
+//  the texture at an angle in all but a few cases.
+// In consequence, flats are not stored by column (like walls),
+//  and the inner loop has to step in texture space u and v.
+//
+int			ds_y; 
+int			ds_x1; 
+int			ds_x2;
 
-	c_faceclip++;
+lighttable_t*		ds_colormap; 
 
-// this is a dummy to give the caching mechanism someplace to write to
-	r_pedge = &tedge;
+fixed_t			ds_xfrac; 
+fixed_t			ds_yfrac; 
+fixed_t			ds_xstep; 
+fixed_t			ds_ystep;
 
-// set up clip planes
-	pclip = NULL;
+// start of a 64*64 tile image 
+byte*			ds_source;	
 
-	for (i=3, mask = 0x08 ; i>=0 ; i--, mask >>= 1)
-	{
-		if (r_clipflags & mask)
-		{
-			view_clipplanes[i].next = pclip;
-			pclip = &view_clipplanes[i];
-		}
-	}
+// just for profiling
+int			dscount;
 
-// push the edges through
-	r_emitted = 0;
-	r_nearzi = 0;
-	r_nearzionly = false;
-	makeleftedge = makerightedge = false;
-// FIXME: keep clipped bmodel edges in clockwise order so last vertex caching
-// can be used?
-	r_lastvertvalid = false;
 
-	for ( ; pedges ; pedges = pedges->pnext)
-	{
-		r_leftclipped = r_rightclipped = false;
-		R_ClipEdge (pedges->v[0], pedges->v[1], pclip);
+//
+// Draws the actual span.
+void R_DrawSpan (void) 
+{ 
+    fixed_t		xfrac;
+    fixed_t		yfrac; 
+    byte*		dest; 
+    int			count;
+    int			spot; 
+	 
+#ifdef RANGECHECK 
+    if (ds_x2 < ds_x1
+	|| ds_x1<0
+	|| ds_x2>=SCREENWIDTH  
+	|| (unsigned)ds_y>SCREENHEIGHT)
+    {
+	I_Error( "R_DrawSpan: %i to %i at %i",
+		 ds_x1,ds_x2,ds_y);
+    }
+//	dscount++; 
+#endif 
 
-		if (r_leftclipped)
-			makeleftedge = true;
-		if (r_rightclipped)
-			makerightedge = true;
-	}
+    
+    xfrac = ds_xfrac; 
+    yfrac = ds_yfrac; 
+	 
+    dest = ylookup[ds_y] + columnofs[ds_x1];
 
-// if there was a clip off the left edge, add that edge too
-// FIXME: faster to do in screen space?
-// FIXME: share clipped edges?
-	if (makeleftedge)
-	{
-		r_pedge = &tedge;
-		R_ClipEdge (&r_leftexit, &r_leftenter, pclip->next);
-	}
+    // We do not check for zero spans here?
+    count = ds_x2 - ds_x1; 
 
-// if there was a clip off the right edge, get the right r_nearzi
-	if (makerightedge)
-	{
-		r_pedge = &tedge;
-		r_nearzionly = true;
-		R_ClipEdge (&r_rightexit, &r_rightenter, view_clipplanes[1].next);
-	}
+    do 
+    {
+	// Current texture index in u,v.
+	spot = ((yfrac>>(16-6))&(63*64)) + ((xfrac>>16)&63);
 
-// if no edges made it out, return without posting the surface
-	if (!r_emitted)
-		return;
+	// Lookup pixel from flat texture tile,
+	//  re-index using light/colormap.
+	*dest++ = ds_colormap[ds_source[spot]];
 
-	r_polycount++;
+	// Next step in u,v.
+	xfrac += ds_xstep; 
+	yfrac += ds_ystep;
+	
+    } while (count--); 
+} 
 
-	surface_p->data = (void *)psurf;
-	surface_p->nearzi = r_nearzi;
-	surface_p->flags = psurf->flags;
-	surface_p->insubmodel = true;
-	surface_p->spanstate = 0;
-	surface_p->entity = currententity;
-	surface_p->key = r_currentbkey;
-	surface_p->spans = NULL;
 
-	pplane = psurf->plane;
-// FIXME: cache this?
-	TransformVector (pplane->normal, p_normal);
-// FIXME: cache this?
-	distinv = 1.0 / (pplane->dist - DotProduct (modelorg, pplane->normal));
 
-	surface_p->d_zistepu = p_normal[0] * xscaleinv * distinv;
-	surface_p->d_zistepv = -p_normal[1] * yscaleinv * distinv;
-	surface_p->d_ziorigin = p_normal[2] * distinv -
-			xcenter * surface_p->d_zistepu -
-			ycenter * surface_p->d_zistepv;
+// UNUSED.
+// Loop unrolled by 4.
+#if 0
+void R_DrawSpan (void) 
+{ 
+    unsigned	position, step;
 
-//JDC	VectorCopy (r_worldmodelorg, surface_p->modelorg);
-	surface_p++;
+    byte*	source;
+    byte*	colormap;
+    byte*	dest;
+    
+    unsigned	count;
+    usingned	spot; 
+    unsigned	value;
+    unsigned	temp;
+    unsigned	xtemp;
+    unsigned	ytemp;
+		
+    position = ((ds_xfrac<<10)&0xffff0000) | ((ds_yfrac>>6)&0xffff);
+    step = ((ds_xstep<<10)&0xffff0000) | ((ds_ystep>>6)&0xffff);
+		
+    source = ds_source;
+    colormap = ds_colormap;
+    dest = ylookup[ds_y] + columnofs[ds_x1];	 
+    count = ds_x2 - ds_x1 + 1; 
+	
+    while (count >= 4) 
+    { 
+	ytemp = position>>4;
+	ytemp = ytemp & 4032;
+	xtemp = position>>26;
+	spot = xtemp | ytemp;
+	position += step;
+	dest[0] = colormap[source[spot]]; 
+
+	ytemp = position>>4;
+	ytemp = ytemp & 4032;
+	xtemp = position>>26;
+	spot = xtemp | ytemp;
+	position += step;
+	dest[1] = colormap[source[spot]];
+	
+	ytemp = position>>4;
+	ytemp = ytemp & 4032;
+	xtemp = position>>26;
+	spot = xtemp | ytemp;
+	position += step;
+	dest[2] = colormap[source[spot]];
+	
+	ytemp = position>>4;
+	ytemp = ytemp & 4032;
+	xtemp = position>>26;
+	spot = xtemp | ytemp;
+	position += step;
+	dest[3] = colormap[source[spot]]; 
+		
+	count -= 4;
+	dest += 4;
+    } 
+    while (count > 0) 
+    { 
+	ytemp = position>>4;
+	ytemp = ytemp & 4032;
+	xtemp = position>>26;
+	spot = xtemp | ytemp;
+	position += step;
+	*dest++ = colormap[source[spot]]; 
+	count--;
+    } 
+} 
+#endif
+
+
+//
+// Again..
+//
+void R_DrawSpanLow (void) 
+{ 
+    fixed_t		xfrac;
+    fixed_t		yfrac; 
+    byte*		dest; 
+    int			count;
+    int			spot; 
+	 
+#ifdef RANGECHECK 
+    if (ds_x2 < ds_x1
+	|| ds_x1<0
+	|| ds_x2>=SCREENWIDTH  
+	|| (unsigned)ds_y>SCREENHEIGHT)
+    {
+	I_Error( "R_DrawSpan: %i to %i at %i",
+		 ds_x1,ds_x2,ds_y);
+    }
+//	dscount++; 
+#endif 
+	 
+    xfrac = ds_xfrac; 
+    yfrac = ds_yfrac; 
+
+    // Blocky mode, need to multiply by 2.
+    ds_x1 <<= 1;
+    ds_x2 <<= 1;
+    
+    dest = ylookup[ds_y] + columnofs[ds_x1];
+  
+    
+    count = ds_x2 - ds_x1; 
+    do 
+    { 
+	spot = ((yfrac>>(16-6))&(63*64)) + ((xfrac>>16)&63);
+	// Lowres/blocky mode does it twice,
+	//  while scale is adjusted appropriately.
+	*dest++ = ds_colormap[ds_source[spot]]; 
+	*dest++ = ds_colormap[ds_source[spot]];
+	
+	xfrac += ds_xstep; 
+	yfrac += ds_ystep; 
+
+    } while (count--); 
 }
 
+//
+// R_InitBuffer 
+// Creats lookup tables that avoid
+//  multiplies and other hazzles
+//  for getting the framebuffer address
+//  of a pixel to draw.
+//
+void
+R_InitBuffer
+( int		width,
+  int		height ) 
+{ 
+    int		i; 
 
-/*
-================
-R_RenderPoly
-================
-*/
-void R_RenderPoly (msurface_t *fa, int clipflags)
-{
-	int			i, lindex, lnumverts, s_axis, t_axis;
-	float		dist, lastdist, lzi, scale, u, v, frac;
-	unsigned	mask;
-	vec3_t		local, transformed;
-	clipplane_t	*pclip;
-	medge_t		*pedges;
-	mplane_t	*pplane;
-	mvertex_t	verts[2][100];	//FIXME: do real number
-	polyvert_t	pverts[100];	//FIXME: do real number, safely
-	int			vertpage, newverts, newpage, lastvert;
-	qboolean	visible;
+    // Handle resize,
+    //  e.g. smaller view windows
+    //  with border and/or status bar.
+    viewwindowx = (SCREENWIDTH-width) >> 1; 
 
-// FIXME: clean this up and make it faster
-// FIXME: guard against running out of vertices
+    // Column offset. For windows.
+    for (i=0 ; i<width ; i++) 
+	columnofs[i] = viewwindowx + i;
 
-	s_axis = t_axis = 0;	// keep compiler happy
+    // Samw with base row offset.
+    if (width == SCREENWIDTH) 
+	viewwindowy = 0; 
+    else 
+	viewwindowy = (SCREENHEIGHT-SBARHEIGHT-height) >> 1; 
 
-// set up clip planes
-	pclip = NULL;
-
-	for (i=3, mask = 0x08 ; i>=0 ; i--, mask >>= 1)
-	{
-		if (clipflags & mask)
-		{
-			view_clipplanes[i].next = pclip;
-			pclip = &view_clipplanes[i];
-		}
-	}
-
-// reconstruct the polygon
-// FIXME: these should be precalculated and loaded off disk
-	pedges = currententity->model->edges;
-	lnumverts = fa->numedges;
-	vertpage = 0;
-
-	for (i=0 ; i<lnumverts ; i++)
-	{
-		lindex = currententity->model->surfedges[fa->firstedge + i];
-
-		if (lindex > 0)
-		{
-			r_pedge = &pedges[lindex];
-			verts[0][i] = r_pcurrentvertbase[r_pedge->v[0]];
-		}
-		else
-		{
-			r_pedge = &pedges[-lindex];
-			verts[0][i] = r_pcurrentvertbase[r_pedge->v[1]];
-		}
-	}
-
-// clip the polygon, done if not visible
-	while (pclip)
-	{
-		lastvert = lnumverts - 1;
-		lastdist = DotProduct (verts[vertpage][lastvert].position,
-							   pclip->normal) - pclip->dist;
-
-		visible = false;
-		newverts = 0;
-		newpage = vertpage ^ 1;
-
-		for (i=0 ; i<lnumverts ; i++)
-		{
-			dist = DotProduct (verts[vertpage][i].position, pclip->normal) -
-					pclip->dist;
-
-			if ((lastdist > 0) != (dist > 0))
-			{
-				frac = dist / (dist - lastdist);
-				verts[newpage][newverts].position[0] =
-						verts[vertpage][i].position[0] +
-						((verts[vertpage][lastvert].position[0] -
-						  verts[vertpage][i].position[0]) * frac);
-				verts[newpage][newverts].position[1] =
-						verts[vertpage][i].position[1] +
-						((verts[vertpage][lastvert].position[1] -
-						  verts[vertpage][i].position[1]) * frac);
-				verts[newpage][newverts].position[2] =
-						verts[vertpage][i].position[2] +
-						((verts[vertpage][lastvert].position[2] -
-						  verts[vertpage][i].position[2]) * frac);
-				newverts++;
-			}
-
-			if (dist >= 0)
-			{
-				verts[newpage][newverts] = verts[vertpage][i];
-				newverts++;
-				visible = true;
-			}
-
-			lastvert = i;
-			lastdist = dist;
-		}
-
-		if (!visible || (newverts < 3))
-			return;
-
-		lnumverts = newverts;
-		vertpage ^= 1;
-		pclip = pclip->next;
-	}
-
-// transform and project, remembering the z values at the vertices and
-// r_nearzi, and extract the s and t coordinates at the vertices
-	pplane = fa->plane;
-	switch (pplane->type)
-	{
-	case PLANE_X:
-	case PLANE_ANYX:
-		s_axis = 1;
-		t_axis = 2;
-		break;
-	case PLANE_Y:
-	case PLANE_ANYY:
-		s_axis = 0;
-		t_axis = 2;
-		break;
-	case PLANE_Z:
-	case PLANE_ANYZ:
-		s_axis = 0;
-		t_axis = 1;
-		break;
-	}
-
-	r_nearzi = 0;
-
-	for (i=0 ; i<lnumverts ; i++)
-	{
-	// transform and project
-		VectorSubtract (verts[vertpage][i].position, modelorg, local);
-		TransformVector (local, transformed);
-
-		if (transformed[2] < NEAR_CLIP)
-			transformed[2] = NEAR_CLIP;
-
-		lzi = 1.0 / transformed[2];
-
-		if (lzi > r_nearzi)	// for mipmap finding
-			r_nearzi = lzi;
-
-	// FIXME: build x/yscale into transform?
-		scale = xscale * lzi;
-		u = (xcenter + scale*transformed[0]);
-		if (u < r_refdef.fvrectx_adj)
-			u = r_refdef.fvrectx_adj;
-		if (u > r_refdef.fvrectright_adj)
-			u = r_refdef.fvrectright_adj;
-
-		scale = yscale * lzi;
-		v = (ycenter - scale*transformed[1]);
-		if (v < r_refdef.fvrecty_adj)
-			v = r_refdef.fvrecty_adj;
-		if (v > r_refdef.fvrectbottom_adj)
-			v = r_refdef.fvrectbottom_adj;
-
-		pverts[i].u = u;
-		pverts[i].v = v;
-		pverts[i].zi = lzi;
-		pverts[i].s = verts[vertpage][i].position[s_axis];
-		pverts[i].t = verts[vertpage][i].position[t_axis];
-	}
-
-// build the polygon descriptor, including fa, r_nearzi, and u, v, s, t, and z
-// for each vertex
-	r_polydesc.numverts = lnumverts;
-	r_polydesc.nearzi = r_nearzi;
-	r_polydesc.pcurrentface = fa;
-	r_polydesc.pverts = pverts;
-
-// draw the polygon
-	D_DrawPoly ();
-}
+    // Preclaculate all row offsets.
+    for (i=0 ; i<height ; i++) 
+	ylookup[i] = screens[0] + (i+viewwindowy)*SCREENWIDTH; 
+} 
+ 
+ 
 
 
-/*
-================
-R_ZDrawSubmodelPolys
-================
-*/
-void R_ZDrawSubmodelPolys (model_t *pmodel)
-{
-	int			i, numsurfaces;
-	msurface_t	*psurf;
-	float		dot;
-	mplane_t	*pplane;
+//
+// R_FillBackScreen
+// Fills the back screen with a pattern
+//  for variable screen sizes
+// Also draws a beveled edge.
+//
+void R_FillBackScreen (void) 
+{ 
+    byte*	src;
+    byte*	dest; 
+    int		x;
+    int		y; 
+    patch_t*	patch;
 
-	psurf = &pmodel->surfaces[pmodel->firstmodelsurface];
-	numsurfaces = pmodel->nummodelsurfaces;
+    // DOOM border patch.
+    char	name1[] = "FLOOR7_2";
 
-	for (i=0 ; i<numsurfaces ; i++, psurf++)
-	{
-	// find which side of the node we are on
-		pplane = psurf->plane;
+    // DOOM II border patch.
+    char	name2[] = "GRNROCK";	
 
-		dot = DotProduct (modelorg, pplane->normal) - pplane->dist;
+    char*	name;
+	
+    if (scaledviewwidth == 320)
+	return;
+	
+    if ( gamemode == commercial)
+	name = name2;
+    else
+	name = name1;
+    
+    src = W_CacheLumpName (name, PU_CACHE); 
+    dest = screens[1]; 
+	 
+    for (y=0 ; y<SCREENHEIGHT-SBARHEIGHT ; y++) 
+    { 
+	for (x=0 ; x<SCREENWIDTH/64 ; x++) 
+	{ 
+	    memcpy (dest, src+((y&63)<<6), 64); 
+	    dest += 64; 
+	} 
 
-	// draw the polygon
-		if (((psurf->flags & SURF_PLANEBACK) && (dot < -BACKFACE_EPSILON)) ||
-			(!(psurf->flags & SURF_PLANEBACK) && (dot > BACKFACE_EPSILON)))
-		{
-		// FIXME: use bounding-box-based frustum clipping info?
-			R_RenderPoly (psurf, 15);
-		}
-	}
-}
+	if (SCREENWIDTH&63) 
+	{ 
+	    memcpy (dest, src+((y&63)<<6), SCREENWIDTH&63); 
+	    dest += (SCREENWIDTH&63); 
+	} 
+    } 
+	
+    patch = W_CacheLumpName ("brdr_t",PU_CACHE);
 
+    for (x=0 ; x<scaledviewwidth ; x+=8)
+	V_DrawPatch (viewwindowx+x,viewwindowy-8,1,patch);
+    patch = W_CacheLumpName ("brdr_b",PU_CACHE);
+
+    for (x=0 ; x<scaledviewwidth ; x+=8)
+	V_DrawPatch (viewwindowx+x,viewwindowy+viewheight,1,patch);
+    patch = W_CacheLumpName ("brdr_l",PU_CACHE);
+
+    for (y=0 ; y<viewheight ; y+=8)
+	V_DrawPatch (viewwindowx-8,viewwindowy+y,1,patch);
+    patch = W_CacheLumpName ("brdr_r",PU_CACHE);
+
+    for (y=0 ; y<viewheight ; y+=8)
+	V_DrawPatch (viewwindowx+scaledviewwidth,viewwindowy+y,1,patch);
+
+
+    // Draw beveled edge. 
+    V_DrawPatch (viewwindowx-8,
+		 viewwindowy-8,
+		 1,
+		 W_CacheLumpName ("brdr_tl",PU_CACHE));
+    
+    V_DrawPatch (viewwindowx+scaledviewwidth,
+		 viewwindowy-8,
+		 1,
+		 W_CacheLumpName ("brdr_tr",PU_CACHE));
+    
+    V_DrawPatch (viewwindowx-8,
+		 viewwindowy+viewheight,
+		 1,
+		 W_CacheLumpName ("brdr_bl",PU_CACHE));
+    
+    V_DrawPatch (viewwindowx+scaledviewwidth,
+		 viewwindowy+viewheight,
+		 1,
+		 W_CacheLumpName ("brdr_br",PU_CACHE));
+} 
+ 
+
+//
+// Copy a screen buffer.
+//
+void
+R_VideoErase
+( unsigned	ofs,
+  int		count ) 
+{ 
+  // LFB copy.
+  // This might not be a good idea if memcpy
+  //  is not optiomal, e.g. byte by byte on
+  //  a 32bit CPU, as GNU GCC/Linux libc did
+  //  at one point.
+    memcpy (screens[0]+ofs, screens[1]+ofs, count); 
+} 
+
+
+//
+// R_DrawViewBorder
+// Draws the border around the view
+//  for different size windows?
+//
+void
+V_MarkRect
+( int		x,
+  int		y,
+  int		width,
+  int		height ); 
+ 
+void R_DrawViewBorder (void) 
+{ 
+    int		top;
+    int		side;
+    int		ofs;
+    int		i; 
+ 
+    if (scaledviewwidth == SCREENWIDTH) 
+	return; 
+  
+    top = ((SCREENHEIGHT-SBARHEIGHT)-viewheight)/2; 
+    side = (SCREENWIDTH-scaledviewwidth)/2; 
+ 
+    // copy top and one line of left side 
+    R_VideoErase (0, top*SCREENWIDTH+side); 
+ 
+    // copy one line of right side and bottom 
+    ofs = (viewheight+top)*SCREENWIDTH-side; 
+    R_VideoErase (ofs, top*SCREENWIDTH+side); 
+ 
+    // copy sides using wraparound 
+    ofs = top*SCREENWIDTH + SCREENWIDTH-side; 
+    side <<= 1;
+    
+    for (i=1 ; i<viewheight ; i++) 
+    { 
+	R_VideoErase (ofs, side); 
+	ofs += SCREENWIDTH; 
+    } 
+
+    // ? 
+    V_MarkRect (0,0,SCREENWIDTH, SCREENHEIGHT-SBARHEIGHT); 
+} 
+ 
+ 

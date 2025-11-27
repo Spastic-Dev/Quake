@@ -15,37 +15,56 @@
 // for more details.
 //
 // DESCRIPTION:
-//	Refresh (R_*) module, global header.
-//	All the rendering/drawing stuff is here.
+//	Refresh module, BSP traversal and handling.
 //
 //-----------------------------------------------------------------------------
 
-#ifndef __R_LOCAL__
-#define __R_LOCAL__
 
-// Binary Angles, sine/cosine/atan lookups.
-#include "tables.h"
+#ifndef __R_BSP__
+#define __R_BSP__
 
-// Screen size related parameters.
-#include "doomdef.h"
-
-// Include the refresh/render data structs.
-#include "r_data.h"
+#ifdef __GNUG__
+#pragma interface
+#endif
 
 
+extern seg_t*		curline;
+extern side_t*		sidedef;
+extern line_t*		linedef;
+extern sector_t*	frontsector;
+extern sector_t*	backsector;
 
-//
-// Separate header file for each module.
-//
-#include "r_main.h"
-#include "r_bsp.h"
-#include "r_segs.h"
-#include "r_plane.h"
-#include "r_data.h"
-#include "r_things.h"
-#include "r_draw.h"
+extern int		rw_x;
+extern int		rw_stopx;
 
-#endif		// __R_LOCAL__
+extern boolean		segtextured;
+
+// false if the back side is the same plane
+extern boolean		markfloor;		
+extern boolean		markceiling;
+
+extern boolean		skymap;
+
+extern drawseg_t	drawsegs[MAXDRAWSEGS];
+extern drawseg_t*	ds_p;
+
+extern lighttable_t**	hscalelight;
+extern lighttable_t**	vscalelight;
+extern lighttable_t**	dscalelight;
+
+
+typedef void (*drawfunc_t) (int start, int stop);
+
+
+// BSP?
+void R_ClearClipSegs (void);
+void R_ClearDrawSegs (void);
+
+
+void R_RenderBSPNode (int bspnum);
+
+
+#endif
 //-----------------------------------------------------------------------------
 //
 // $Log:$
